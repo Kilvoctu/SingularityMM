@@ -4,6 +4,8 @@
 #[cfg(target_os = "windows")]
 use std::process::Command;
 #[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
 use winreg::enums::*;
 #[cfg(target_os = "windows")]
 use winreg::RegKey;
@@ -207,6 +209,7 @@ static DIR_LOCK: Mutex<()> = Mutex::new(());
 
 struct StartupState {
     pending_nxm: Mutex<Option<String>>,
+    cached_game_path: Mutex<Option<(PathBuf, String)>>,
 }
 
 // --- HELPER FUNCTIONS ---
@@ -546,7 +549,20 @@ fn get_state_file_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir.join("window-state.json"))
 }
 
-fn find_game_path() -> Option<PathBuf> {
+fn get_game_path(state: &State<'_, StartupState>) -> Option<(PathBuf, String)> {
+    let mut cache = state.cached_game_path.lock().unwrap();
+    if let Some(cached) = cache.as_ref() {
+        return Some(cached.clone());
+    }
+
+    let path = find_game_path();
+    if path.is_some() {
+        *cache = path.clone();
+    }
+    path
+}
+
+fn find_game_path() -> Option<(PathBuf, String)> {
     #[cfg(target_os = "windows")]
     {
         return find_steam_path()
@@ -571,9 +587,9 @@ fn find_game_path() -> Option<PathBuf> {
 
         for path in possible_paths {
             // Check for the Binaries folder to verify it's a real install
-            if path.join("Binaries").exists() {
-                return Some(path);
-            }
+                if path.join("Binaries").exists() {
+                    return Some((path, "Steam".to_string()));
+                }
         }
 
         return None;
@@ -585,7 +601,7 @@ fn find_game_path() -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-fn find_gog_path() -> Option<PathBuf> {
+fn find_gog_path() -> Option<(PathBuf, String)> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let known_ids = ["1446213994", "1446223351"];
 
@@ -596,7 +612,7 @@ fn find_gog_path() -> Option<PathBuf> {
             if let Ok(game_path_str) = gog_key.get_value::<String, _>("PATH") {
                 let game_path = PathBuf::from(game_path_str);
                 if game_path.join("Binaries").is_dir() {
-                    return Some(game_path);
+                    return Some((game_path, "GOG".to_string()));
                 }
             }
         }
@@ -605,7 +621,7 @@ fn find_gog_path() -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-fn find_steam_path() -> Option<PathBuf> {
+fn find_steam_path() -> Option<(PathBuf, String)> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     if let Ok(steam_key) = hklm.open_subkey(r"SOFTWARE\WOW6432Node\Valve\Steam") {
         if let Ok(steam_path_str) = steam_key.get_value::<String, _>("InstallPath") {
@@ -634,7 +650,7 @@ fn find_steam_path() -> Option<PathBuf> {
                     {
                         let game_path = folder.join("steamapps").join("common").join(dir_str);
                         if game_path.is_dir() {
-                            return Some(game_path);
+                            return Some((game_path, "Steam".to_string()));
                         }
                     }
                 }
@@ -645,35 +661,66 @@ fn find_steam_path() -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-fn find_gamepass_path() -> Option<PathBuf> {
-    let default_path = PathBuf::from("C:\\XboxGames\\No Man's Sky\\Content");
-    if default_path.join("Binaries").is_dir() {
-        return Some(default_path);
-    }
+fn find_gamepass_path() -> Option<(PathBuf, String)> {
     let output = match Command::new("powershell")
         .args([
             "-NoProfile",
             "-Command",
-            "Get-AppxPackage -Name 'HelloGames.NoMansSky' | Select-Object -ExpandProperty InstallLocation",
+            "Get-AppxPackage *NoMansSky* | Select-Object -ExpandProperty InstallLocation",
         ])
+        .creation_flags(0x08000000)
         .output()
         {
-            Ok(output) => output,
-            Err(_) => return None,
+            Ok(output) => Some(output),
+            Err(e) => {
+                eprintln!("GamePass: PowerShell failed to run: {}", e);
+                None
+            }
         };
 
-    if output.status.success() {
-        let path_str = String::from_utf8(output.stdout)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if !path_str.is_empty() {
-            let game_path = PathBuf::from(path_str).join("Content");
-            if game_path.join("Binaries").is_dir() {
-                return Some(game_path);
+    if let Some(output) = output {
+        if output.status.success() {
+            let path_str = String::from_utf8(output.stdout)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            
+            if !path_str.is_empty() {
+                let base_path = PathBuf::from(path_str);
+                
+                // Check if Binaries is directly in the path
+                if base_path.join("Binaries").is_dir() {
+                    return Some((base_path, "GamePass".to_string()));
+                }
+                
+                // Check if Binaries is in a 'Content' subfolder
+                let content_path = base_path.join("Content");
+                if content_path.join("Binaries").is_dir() {
+                    return Some((content_path, "GamePass".to_string()));
+                }
             }
         }
     }
+
+    for drive in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'] {
+        let root = format!("{}:\\XboxGames\\No Man's Sky", drive);
+        let root_path = PathBuf::from(root);
+        
+        if root_path.join("Binaries").is_dir() {
+                    return Some((root_path, "GamePass".to_string()));
+        }
+        
+        let content_path = root_path.join("Content");
+        if content_path.join("Binaries").is_dir() {
+                    return Some((content_path, "GamePass".to_string()));
+        }
+    }
+
+    let default_path = PathBuf::from("C:\\XboxGames\\No Man's Sky\\Content");
+    if default_path.join("Binaries").is_dir() {
+                    return Some((default_path, "GamePass".to_string()));
+    }
+
     None
 }
 
@@ -768,10 +815,16 @@ where
 // --- TAURI COMMANDS ---
 
 #[tauri::command]
-fn get_all_mods_for_render(app: AppHandle) -> Result<Vec<ModRenderData>, String> {
-    let game_path =
-        find_game_path().ok_or_else(|| "Could not find game installation path.".to_string())?;
+fn get_all_mods_for_render(app: AppHandle, state: State<'_, StartupState>) -> Result<Vec<ModRenderData>, String> {
+    let (game_path, _) =
+        get_game_path(&state).ok_or_else(|| "Could not find game installation path.".to_string())?;
     let mods_path = game_path.join("GAMEDATA").join("MODS");
+    let settings_file_path = game_path.join("Binaries").join("SETTINGS").join("GCMODSETTINGS.MXML");
+
+    if !settings_file_path.exists() {
+        return Ok(Vec::new());
+    }
+
     let settings_file_path = game_path.join("Binaries").join("SETTINGS").join("GCMODSETTINGS.MXML");
 
     if !settings_file_path.exists() {
@@ -1060,8 +1113,9 @@ async fn install_mod_from_archive(
     // CASE B: Single Deep Folder
     if installable_paths.len() == 1 {
         emit_progress("Finalizing...");
+        let state = app.state::<StartupState>();
         let mut analysis =
-            finalize_installation(app, library_id, vec![installable_paths[0].clone()], true)?;
+            finalize_installation(app.clone(), state, library_id, vec![installable_paths[0].clone()], true)?;
         analysis.active_archive_path = Some(final_archive_path_str);
         return Ok(analysis);
     }
@@ -1087,7 +1141,8 @@ async fn install_mod_from_archive(
 
     // CASE D: Install All
     emit_progress("Finalizing...");
-    let mut analysis = finalize_installation(app, library_id, vec![], false)?;
+    let state = app.state::<StartupState>();
+    let mut analysis = finalize_installation(app.clone(), state, library_id, vec![], false)?;
     analysis.active_archive_path = Some(final_archive_path_str);
 
     Ok(analysis)
@@ -1096,13 +1151,14 @@ async fn install_mod_from_archive(
 #[tauri::command]
 fn finalize_installation(
     app: AppHandle, 
+    state: State<'_, StartupState>,
     library_id: String, 
     selected_folders: Vec<String>,
     flatten_paths: bool 
 ) -> Result<InstallationAnalysis, String> {
     log_internal(&app, "INFO", &format!("Finalizing installation. Source: {}, Flatten: {}", library_id, flatten_paths));
 
-    let game_path = find_game_path().ok_or_else(|| "Could not find game path.".to_string())?;
+    let (game_path, _) = get_game_path(&state).ok_or_else(|| "Could not find game path.".to_string())?;
     let mods_path = game_path.join("GAMEDATA").join("MODS");
     fs::create_dir_all(&mods_path).map_err(|e| e.to_string())?;
 
@@ -1268,12 +1324,13 @@ fn finalize_installation(
 
 #[tauri::command]
 fn resolve_conflict(
+    state: State<'_, StartupState>,
     new_mod_name: String,
     old_mod_folder_name: String,
     temp_mod_path_str: String,
     replace: bool,
 ) -> Result<(), String> {
-    let game_path = find_game_path().ok_or_else(|| "Could not find game path.".to_string())?;
+    let (game_path, _) = get_game_path(&state).ok_or_else(|| "Could not find game path.".to_string())?;
     let mods_path = game_path.join("GAMEDATA").join("MODS");
     let old_mod_path = mods_path.join(&old_mod_folder_name);
     let final_new_mod_path = mods_path.join(&new_mod_name);
@@ -1302,8 +1359,8 @@ fn resolve_conflict(
 }
 
 #[tauri::command]
-fn delete_settings_file() -> Result<String, String> {
-    if let Some(game_path) = find_game_path() {
+fn delete_settings_file(state: State<'_, StartupState>) -> Result<String, String> {
+    if let Some((game_path, _)) = get_game_path(&state) {
         let settings_file = game_path
             .join("Binaries")
             .join("SETTINGS")
@@ -1326,32 +1383,19 @@ fn delete_settings_file() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn detect_game_installation(app: AppHandle) -> Option<GamePaths> {
+fn detect_game_installation(app: AppHandle, state: State<'_, StartupState>) -> Option<GamePaths> {
     log_internal(&app, "INFO", "Starting Game Detection...");
 
-    if let Some(path) = find_game_path() {
+    if let Some((path, version)) = get_game_path(&state) {
         let settings_dir = path.join("Binaries").join("SETTINGS");
 
         if settings_dir.exists() {
             log_internal(&app, "INFO", &format!("Found game path: {:?}", path));
 
-            // Determine "Version Type" based on OS
-            #[cfg(target_os = "windows")]
-            let v_type = if path.to_string_lossy().contains("Xbox") {
-                "GamePass"
-            } else if path.to_string_lossy().contains("GOG") {
-                "GOG"
-            } else {
-                "Steam"
-            };
-
-            #[cfg(target_os = "linux")]
-            let v_type = "Steam";
-
             return Some(GamePaths {
                 game_root_path: path.to_string_lossy().into_owned(),
                 settings_root_path: path.to_string_lossy().into_owned(),
-                version_type: v_type.to_string(),
+                version_type: version,
             });
         }
     }
@@ -1365,8 +1409,8 @@ fn detect_game_installation(app: AppHandle) -> Option<GamePaths> {
 }
 
 #[tauri::command]
-fn open_mods_folder() -> Result<(), String> {
-    if let Some(game_path) = find_game_path() {
+fn open_mods_folder(state: State<'_, StartupState>) -> Result<(), String> {
+    if let Some((game_path, _)) = get_game_path(&state) {
         let mods_path = game_path.join("GAMEDATA").join("MODS");
         fs::create_dir_all(&mods_path).map_err(|e| {
             format!(
@@ -1410,6 +1454,7 @@ fn resize_window(window: tauri::Window, width: f64) -> Result<(), String> {
 #[tauri::command]
 fn rename_mod_folder(
     app: AppHandle,
+    state: State<'_, StartupState>,
     old_name: String,
     new_name: String,
 ) -> Result<Vec<ModRenderData>, String> {
@@ -1419,7 +1464,7 @@ fn rename_mod_folder(
         &format!("Requesting rename: '{}' -> '{}'", old_name, new_name),
     );
 
-    let game_path = find_game_path().ok_or_else(|| "Could not find game path.".to_string())?;
+    let (game_path, _) = get_game_path(&state).ok_or_else(|| "Could not find game path.".to_string())?;
     let mods_path = game_path.join("GAMEDATA").join("MODS");
 
     let old_path = mods_path.join(&old_name);
@@ -1475,7 +1520,7 @@ fn rename_mod_folder(
         .join("SETTINGS")
         .join("GCMODSETTINGS.MXML");
     if settings_file.exists() {
-        match update_mod_name_in_xml(old_name.clone(), new_name.clone()) {
+        match update_mod_name_in_xml(state.clone(), old_name.clone(), new_name.clone()) {
             Ok(new_xml) => {
                 let _ = save_file(
                     app.clone(),
@@ -1494,19 +1539,19 @@ fn rename_mod_folder(
     }
 
     // 4. Return fresh list
-    get_all_mods_for_render(app)
+    get_all_mods_for_render(app, state)
 }
 
 #[tauri::command]
-fn delete_mod(app: AppHandle, mod_name: String) -> Result<Vec<ModRenderData>, String> {
+fn delete_mod(app: AppHandle, state: State<'_, StartupState>, mod_name: String) -> Result<Vec<ModRenderData>, String> {
     log_internal(
         &app,
         "INFO",
         &format!("Requesting deletion of mod: {}", mod_name),
     );
 
-    let game_path =
-        find_game_path().ok_or_else(|| "Could not find game installation path.".to_string())?;
+    let (game_path, _) =
+        get_game_path(&state).ok_or_else(|| "Could not find game installation path.".to_string())?;
     let settings_file_path = game_path
         .join("Binaries")
         .join("SETTINGS")
@@ -1596,13 +1641,13 @@ fn delete_mod(app: AppHandle, mod_name: String) -> Result<Vec<ModRenderData>, St
     fs::write(&settings_file_path, &final_content)
         .map_err(|e| format!("Failed to save updated GCMODSETTINGS.MXML: {}", e))?;
 
-    get_all_mods_for_render(app)
+    get_all_mods_for_render(app, state)
 }
 
 #[tauri::command]
-fn reorder_mods(ordered_mod_names: Vec<String>) -> Result<String, String> {
-    let game_path =
-        find_game_path().ok_or_else(|| "Could not find game installation path.".to_string())?;
+fn reorder_mods(state: State<'_, StartupState>, ordered_mod_names: Vec<String>) -> Result<String, String> {
+    let (game_path, _) =
+        get_game_path(&state).ok_or_else(|| "Could not find game installation path.".to_string())?;
     let settings_file_path = game_path
         .join("Binaries")
         .join("SETTINGS")
@@ -1682,9 +1727,9 @@ fn reorder_mods(ordered_mod_names: Vec<String>) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn update_mod_name_in_xml(old_name: String, new_name: String) -> Result<String, String> {
-    let game_path =
-        find_game_path().ok_or_else(|| "Could not find game installation path.".to_string())?;
+fn update_mod_name_in_xml(state: State<'_, StartupState>, old_name: String, new_name: String) -> Result<String, String> {
+    let (game_path, _) =
+        get_game_path(&state).ok_or_else(|| "Could not find game installation path.".to_string())?;
     let settings_file_path = game_path
         .join("Binaries")
         .join("SETTINGS")
@@ -1755,9 +1800,9 @@ fn update_mod_name_in_xml(old_name: String, new_name: String) -> Result<String, 
 }
 
 #[tauri::command]
-fn update_mod_id_in_json(mod_folder_name: String, new_mod_id: String) -> Result<(), String> {
-    let game_path =
-        find_game_path().ok_or_else(|| "Could not find game installation path.".to_string())?;
+fn update_mod_id_in_json(state: State<'_, StartupState>, mod_folder_name: String, new_mod_id: String) -> Result<(), String> {
+    let (game_path, _) =
+        get_game_path(&state).ok_or_else(|| "Could not find game installation path.".to_string())?;
     let mod_info_path = game_path
         .join("GAMEDATA")
         .join("MODS")
@@ -1794,14 +1839,15 @@ fn update_mod_id_in_json(mod_folder_name: String, new_mod_id: String) -> Result<
 
 #[tauri::command]
 fn ensure_mod_info(
+    state: State<'_, StartupState>,
     mod_folder_name: String,
     mod_id: String,
     file_id: String,
     version: String,
     install_source: String,
 ) -> Result<(), String> {
-    let game_path =
-        find_game_path().ok_or_else(|| "Could not find game installation path.".to_string())?;
+    let (game_path, _) =
+        get_game_path(&state).ok_or_else(|| "Could not find game installation path.".to_string())?;
     let mod_info_path = game_path
         .join("GAMEDATA")
         .join("MODS")
@@ -2003,32 +2049,39 @@ async fn download_mod_archive(
         &format!("Connection established. Content-Length: {}", total_size),
     );
 
-    let mut file = fs::File::create(&final_archive_path)
+    let mut file = tokio::fs::File::create(&final_archive_path)
+        .await
         .map_err(|e| format!("Failed to create file: {}", e))?;
+    
+    use tokio::io::AsyncWriteExt;
 
     let mut downloaded: u64 = 0;
+    let mut last_emit_time = std::time::Instant::now();
 
     while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
-        file.write_all(&chunk).map_err(|e| e.to_string())?;
+        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
         downloaded += chunk.len() as u64;
 
         if let Some(id) = &download_id {
             if total_size > 0 {
-                let pct = (downloaded * 100) / total_size;
-                // Don't log every percentage to disk, too spammy. Frontend handles visual progress.
-                let _ = app.emit(
-                    "install-progress",
-                    InstallProgressPayload {
-                        id: id.clone(),
-                        step: format!("Downloading: {}%", pct),
-                        progress: Some(pct),
-                    },
-                );
+                let now = std::time::Instant::now();
+                if now.duration_since(last_emit_time).as_millis() >= 100 {
+                    let pct = (downloaded * 100) / total_size;
+                    let _ = app.emit(
+                        "install-progress",
+                        InstallProgressPayload {
+                            id: id.clone(),
+                            step: format!("Downloading: {}%", pct),
+                            progress: Some(pct),
+                        },
+                    );
+                    last_emit_time = now;
+                }
             }
         }
     }
 
-    let metadata = fs::metadata(&final_archive_path).map_err(|e| e.to_string())?;
+    let metadata = tokio::fs::metadata(&final_archive_path).await.map_err(|e| e.to_string())?;
     let file_size = metadata.len();
 
     log_internal(
@@ -2191,7 +2244,7 @@ fn list_profiles(app: AppHandle) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-fn save_active_profile(app: AppHandle, profile_name: String) -> Result<(), String> {
+fn save_active_profile(app: AppHandle, state: State<'_, StartupState>, profile_name: String) -> Result<(), String> {
     let profiles_dir = get_profiles_dir(&app)?;
     let json_path = profiles_dir.join(format!("{}.json", profile_name));
     let mxml_backup_path = profiles_dir.join(format!("{}.mxml", profile_name));
@@ -2199,7 +2252,7 @@ fn save_active_profile(app: AppHandle, profile_name: String) -> Result<(), Strin
     // Map: ZipFilename -> List of Installed Folder Names
     let mut profile_map: HashMap<String, Vec<String>> = HashMap::new();
 
-    if let Some(game_path) = find_game_path() {
+    if let Some((game_path, _)) = get_game_path(&state) {
         let mods_path = game_path.join("GAMEDATA").join("MODS");
         if let Ok(entries) = fs::read_dir(mods_path) {
             for entry in entries.flatten() {
@@ -2246,7 +2299,7 @@ fn save_active_profile(app: AppHandle, profile_name: String) -> Result<(), Strin
         let mut p_version = None;
 
         if let Some(first_folder) = installed_folders.first() {
-            if let Some(gp) = find_game_path() {
+            if let Some((gp, _)) = get_game_path(&state) {
                 let info_p = gp
                     .join("GAMEDATA/MODS")
                     .join(first_folder)
@@ -2283,7 +2336,7 @@ fn save_active_profile(app: AppHandle, profile_name: String) -> Result<(), Strin
 }
 
 #[tauri::command]
-async fn apply_profile(app: AppHandle, profile_name: String) -> Result<(), String> {
+async fn apply_profile(app: AppHandle, state: State<'_, StartupState>, profile_name: String) -> Result<(), String> {
     let dir = get_profiles_dir(&app)?;
     let json_path = dir.join(format!("{}.json", profile_name));
     let mxml_backup_path = dir.join(format!("{}.mxml", profile_name));
@@ -2299,7 +2352,7 @@ async fn apply_profile(app: AppHandle, profile_name: String) -> Result<(), Strin
         serde_json::from_str(&content).map_err(|e| e.to_string())?
     };
 
-    let game_path = find_game_path().ok_or("Game path not found")?;
+    let (game_path, _) = get_game_path(&state).ok_or("Game path not found")?;
     let mods_dir = game_path.join("GAMEDATA/MODS");
 
     // Clean Game Folder
@@ -2509,8 +2562,8 @@ fn create_empty_profile(app: AppHandle, profile_name: String) -> Result<(), Stri
 }
 
 #[tauri::command]
-fn check_for_untracked_mods() -> bool {
-    if let Some(game_path) = find_game_path() {
+fn check_for_untracked_mods(state: State<'_, StartupState>) -> bool {
+    if let Some((game_path, _)) = get_game_path(&state) {
         let mods_path = game_path.join("GAMEDATA").join("MODS");
         if let Ok(entries) = fs::read_dir(mods_path) {
             for entry in entries.flatten() {
@@ -2871,7 +2924,7 @@ fn get_staging_contents(
 }
 
 #[tauri::command]
-async fn run_legacy_migration(app: AppHandle) -> Result<(), String> {
+async fn run_legacy_migration(app: AppHandle, state: State<'_, StartupState>) -> Result<(), String> {
     let config_path = get_config_file_path(&app)?;
 
     // 1. Load Config
@@ -2930,7 +2983,7 @@ async fn run_legacy_migration(app: AppHandle) -> Result<(), String> {
     );
 
     // 3. Scan Installed Mods in Game Folder
-    if let Some(game_path) = find_game_path() {
+    if let Some((game_path, _)) = get_game_path(&state) {
         let mods_path = game_path.join("GAMEDATA/MODS");
 
         if let Ok(entries) = fs::read_dir(mods_path) {
@@ -3137,6 +3190,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .manage(StartupState {
             pending_nxm: Mutex::new(None),
+            cached_game_path: Mutex::new(None),
         })
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             println!("New instance detected, args: {:?}", argv);

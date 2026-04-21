@@ -1,3 +1,16 @@
+## Changes from Upstream
+This fork exists as Singularity does not work properly for me as a Game Pass user, so I've fixed it for myself and added some quality of life:
+
+- Improves Game Pass detection by scanning all drives with a relaxed `Get-AppxPackage` query.
+- Correctly launch No Man's Sky for Game Pass instead of trying to launch Steam.
+- Cache the path to prevent repetitive disk searching, and also stop repeated PowerShell popup windows.
+- Stop Singularity from resizing whenever looking at a mod card in "Browse". 
+- Apply asynchronous and throttling logic for fetch operations to avoid UI freezes.
+- Update API calls to fix "Could not retrieve download URL" issues (I don't have Nexus Premium anyway). 
+- Manual installation from Nexus will automatically pull metadata from the file (as Nexus filenames have this format `Mod-ID-Version-Timestamp.zip`)
+- - Mods installed this way will have the automatic metadata, and "Check for Updates" will work by comparing it with Nexus. Who needs Premium!
+
+Original Readme below
 # Singularity
 
 A lightweight Windows-based Mod manager for No Man's Sky built with Tauri v2 that started as a curiosity.

@@ -21,6 +21,7 @@ const appWindow = getCurrentWindow();
 let NEXUS_API_KEY = "";
 const CURATED_LIST_URL = "https://raw.githubusercontent.com/Syzzle07/SingularityMM/data/curated/curated_list.json";
 let curatedData = [];
+let isCuratedLoading = true;
 let downloadHistory = [];
 const nexusFileCache = new Map();
 
@@ -609,22 +610,22 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function fetchCuratedData() {
-    // 1. Load local cache
-    const cachedObj = await loadCuratedListFromCache();
-
-    // 2. Check if cache is valid time-wise
-    if (cachedObj) {
-      const isStale = (Date.now() - cachedObj.timestamp) > CACHE_DURATION_MS;
-
-      // If it's NOT stale, just use the data and stop.
-      if (!isStale) {
-        curatedData = cachedObj.data;
-        return;
-      }
-    }
-
-    // 3. It is stale (older than 1 hour). Fetch fresh data.
     try {
+      // 1. Load local cache
+      const cachedObj = await loadCuratedListFromCache();
+
+      // 2. Check if cache is valid time-wise
+      if (cachedObj) {
+        const isStale = (Date.now() - cachedObj.timestamp) > CACHE_DURATION_MS;
+
+        // If it's NOT stale, just use the data and stop.
+        if (!isStale) {
+          curatedData = cachedObj.data;
+          return;
+        }
+      }
+
+      // 3. It is stale (older than 1 hour). Fetch fresh data.
       console.log("Cache stale. Fetching fresh list from GitHub...");
 
       const response = await fetch(CURATED_LIST_URL);
@@ -642,11 +643,17 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (error) {
       console.error("CRITICAL: Could not load curated mod data:", error);
       // Fallback: If network fails, try to use old cache even if stale
+      const cachedObj = await loadCuratedListFromCache();
       if (cachedObj) {
         console.warn("Using stale cache due to network error.");
         curatedData = cachedObj.data;
       } else {
         await window.customAlert("Failed to load mod data from the server. Update checks and the browse tab will not work.", "Network Error");
+      }
+    } finally {
+      isCuratedLoading = false;
+      if (!browseView.classList.contains('hidden')) {
+        fetchAndRenderBrowseGrid();
       }
     }
   }
@@ -726,6 +733,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- 2. AWAIT CRITICAL SETUP ---
     // We block UI rendering only for these essentials
     await Promise.all([langPromise, historyPromise, migrationPromise]);
+
+    checkForManualModUpdates();
 
     // --- 3. INITIALIZE UI COMPONENTS ---
 
@@ -2002,12 +2011,45 @@ document.addEventListener('DOMContentLoaded', () => {
         newItem.classList.add('installable');
       }
 
-      const displayName = (itemData.displayName && itemData.version)
-        ? `${itemData.displayName} (${itemData.version})`
-        : itemData.fileName;
-      const nameEl = newItem.querySelector('.download-item-name');
-      nameEl.textContent = displayName;
-      nameEl.setAttribute('title', displayName);
+       const displayName = (itemData.displayName && itemData.version)
+         ? `${itemData.displayName} (${itemData.version})`
+         : itemData.fileName;
+       const nameEl = newItem.querySelector('.download-item-name');
+       nameEl.textContent = displayName;
+       
+       // Add Author if available
+       if (itemData.author) {
+         const authorSpan = document.createElement('span');
+         authorSpan.className = 'download-item-author';
+         authorSpan.textContent = ` by ${itemData.author}`;
+         authorSpan.style.fontSize = '0.85em';
+         authorSpan.style.opacity = '0.7';
+         authorSpan.style.marginLeft = '5px';
+         nameEl.appendChild(authorSpan);
+       }
+
+       // Update Badge
+       if (itemData.hasUpdate) {
+         const updateBadge = document.createElement('span');
+         updateBadge.className = 'update-badge';
+         updateBadge.textContent = 'UPDATE';
+         updateBadge.style.backgroundColor = '#ffcc00';
+         updateBadge.style.color = '#000';
+         updateBadge.style.fontSize = '0.7em';
+         updateBadge.style.fontWeight = 'bold';
+         updateBadge.style.padding = '2px 4px';
+         updateBadge.style.borderRadius = '3px';
+         updateBadge.style.marginLeft = '8px';
+         updateBadge.style.verticalAlign = 'middle';
+         nameEl.appendChild(updateBadge);
+       }
+
+       // Add description as tooltip if available
+       const tooltipText = itemData.description 
+         ? `${displayName}\n\n${itemData.description}` 
+         : displayName;
+       nameEl.setAttribute('title', tooltipText);
+
 
       const statusEl = newItem.querySelector('.download-item-status');
 
@@ -2420,17 +2462,41 @@ document.addEventListener('DOMContentLoaded', () => {
       url += `?${queryParams}`;
     }
 
+    try {
+      const latestKey = await invoke('get_nexus_api_key');
+      NEXUS_API_KEY = latestKey;
+    } catch (e) {
+      console.warn("Could not refresh API key from backend:", e);
+    }
+
     const headers = { "apikey": NEXUS_API_KEY };
     try {
-      const response = await fetch(url, { headers });
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+
+      const response = await fetch(url, { 
+        headers,
+        signal: controller.signal 
+      });
+      clearTimeout(timeoutId);
+
       if (!response.ok) {
-        console.error(`API Error ${response.status}:`, await response.text());
+        const errorText = await response.text();
+        console.error(`API Error ${response.status}:`, errorText);
+        await window.customAlert(`Nexus API Error ${response.status}: ${errorText}`, "Download Error");
         return null;
       }
       const data = await response.json();
+      console.log("Nexus Download Link Data:", data);
       return data[0]?.URI;
     } catch (error) {
-      console.error(`Failed to get download URL for mod ${modId}:`, error);
+      if (error.name === 'AbortError') {
+        console.error(`Request timed out for mod ${modId}`);
+        await window.customAlert(`Request timed out for mod ${modId}`, "Network Timeout");
+      } else {
+        console.error(`Failed to get download URL for mod ${modId}:`, error);
+        await window.customAlert(`Failed to get download URL: ${error.message}`, "Network Error");
+      }
       return null;
     }
   }
@@ -2452,6 +2518,89 @@ document.addEventListener('DOMContentLoaded', () => {
       return null;
     }
   }
+
+  function parseNexusFilename(filename) {
+    // Pattern: Name-ModID-Version-Timestamp.extension
+    
+    const extRegex = /\.(zip|rar|7z)$/i;
+    const extMatch = filename.match(extRegex);
+    if (!extMatch) return null;
+
+    const baseName = filename.slice(0, extMatch.index);
+    const parts = baseName.split('-');
+    
+    if (parts.length < 3) return null;
+
+    // 1. The last part is always the timestamp
+    const timestamp = parts[parts.length - 1];
+    if (!/^\d+$/.test(timestamp)) return null;
+
+    // 2. Find the ModID: The first purely numeric part that isn't the timestamp
+    let modIdIndex = -1;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (/^\d+$/.test(parts[i])) {
+        modIdIndex = i;
+        break;
+      }
+    }
+
+    if (modIdIndex === -1) return null;
+
+    const modId = parts[modIdIndex];
+    const name = parts.slice(0, modIdIndex).join('-');
+    const version = parts.slice(modIdIndex + 1, parts.length - 1).join('-').replace(/-/g, '.');
+    
+    return {
+      name,
+      modId,
+      version,
+      timestamp
+    };
+
+  }
+
+  async function fetchModMetadataFromNexus(modId) {
+    const modIdStr = String(modId);
+    const url = `https://api.nexusmods.com/v1/games/nomanssky/mods/${modIdStr}.json`;
+    const headers = { "apikey": NEXUS_API_KEY };
+    try {
+      const response = await fetch(url, { headers });
+      if (!response.ok) return null;
+      return await response.json();
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async function checkForManualModUpdates() {
+    console.log("Checking for updates on manual installs...");
+    let changed = false;
+
+    for (const item of downloadHistory) {
+      if (item.modId && item.timestamp) {
+        const filesData = await fetchModFilesFromNexus(item.modId);
+        if (filesData && filesData.files && filesData.files.length > 0) {
+          // Find the newest file by timestamp
+          const newestFile = filesData.files.reduce((prev, current) => {
+            return (prev.updated_timestamp > current.updated_timestamp) ? prev : current;
+          });
+
+          const isOutdated = parseInt(newestFile.updated_timestamp) > parseInt(item.timestamp);
+          if (isOutdated !== item.hasUpdate) {
+            item.hasUpdate = isOutdated;
+            changed = true;
+          }
+        }
+      }
+    }
+
+    if (changed) {
+      renderDownloadHistory();
+      await saveDownloadHistory(downloadHistory);
+    }
+  }
+
+
 
   function displayChangelogs(modName, changelogs) {
     changelogModalTitle.textContent = `Changelogs: ${modName}`;
@@ -2570,6 +2719,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // --- Browse Tab Logic ---
   function fetchAndRenderBrowseGrid() {
+    if (isCuratedLoading) {
+      browseGridContainer.innerHTML = '<h2>Loading curated list... Please wait.</h2>';
+      return;
+    }
     if (curatedData.length === 0) {
       browseGridContainer.innerHTML = '<h2>Curated list could not be loaded.</h2>';
       return;
@@ -2830,13 +2983,11 @@ document.addEventListener('DOMContentLoaded', () => {
       // This tells us the width of the monitor the window is currently on.
       const screenWidth = window.screen.availWidth;
 
-      // If the screen is big enough (PC), resize the window
+      // If the screen is big enough (PC), mark as expanded mode for logic
       if (screenWidth >= PANEL_OPEN_WIDTH) {
-        isPanelOpen = true; // Mark as expanded mode
-        const currentSize = await appWindow.innerSize();
-        await appWindow.setSize(new LogicalSize(PANEL_OPEN_WIDTH, currentSize.height));
+        isPanelOpen = true; 
       } else {
-        // If screen is small (Steam Deck: 1280px), DO NOT resize window.
+        // If screen is small (Steam Deck: 1280px), DO NOT mark as expanded
         isPanelOpen = false;
       }
     }
@@ -2997,23 +3148,64 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Use the pre-loaded local info
     const localModInfo = cachedModData.local_info;
-    if (localModInfo && localModInfo.version) {
+    if (localModInfo && localModInfo.version && localModInfo.version !== '0') {
       infoInstalledVersion.textContent = localModInfo.version;
     } else {
-      infoInstalledVersion.textContent = '...';
+      const historyItem = modId ? downloadHistory.find(item => String(item.modId) === String(modId)) : null;
+      infoInstalledVersion.textContent = historyItem?.version || '...';
     }
 
     // Now, find the remote info
     const modId = localModInfo?.mod_id;
+    
+    let historyInfo = null;
+    if (modId) {
+      historyInfo = downloadHistory.find(item => String(item.modId) === String(modId));
+    }
+
     const remoteInfo = modId ? curatedData.find(m => String(m.mod_id) === String(modId)) : null;
 
-    // Prioritize showing remote data, but fall back to local/default data
-    infoModName.textContent = remoteInfo?.name || modFolderName;
-    infoAuthor.textContent = remoteInfo?.author || 'Unknown';
-    infoDescription.textContent = remoteInfo?.summary || (localModInfo ? i18n.get('noDescription') : i18n.get('noLocalInfo'));
+    let finalInfo = historyInfo || remoteInfo;
+
+    if (modId && (!finalInfo || finalInfo.version === "0" || !finalInfo.author)) {
+      try {
+        const freshMeta = await fetchModMetadataFromNexus(modId);
+        if (freshMeta) {
+          finalInfo = {
+            ...freshMeta,
+            mod_id: modId,
+            description: freshMeta.summary || freshMeta.description
+          };
+        }
+      } catch (e) {
+        console.warn("Live metadata fetch failed, using fallback:", e);
+      }
+    }
+
+    infoModName.textContent = finalInfo?.name || finalInfo?.displayName || modFolderName;
+    infoAuthor.textContent = finalInfo?.author || 'Unknown';
+    infoDescription.textContent = finalInfo?.summary || finalInfo?.description || (localModInfo ? i18n.get('noDescription') : i18n.get('noLocalInfo'));
+
 
     // Logic to determine latest version
-    let latestVersionToShow = remoteInfo?.version || 'N/A';
+    const bestInfo = historyInfo || remoteInfo;
+    
+    let latestVersionToShow = bestInfo?.version || 'N/A';
+    
+    if (modId && (latestVersionToShow === '0' || latestVersionToShow === 'N/A')) {
+      try {
+        const filesData = await fetchModFilesFromNexus(modId);
+        if (filesData && filesData.files && filesData.files.length > 0) {
+          // Find the newest file by timestamp
+          const newestFile = filesData.files.reduce((prev, current) => {
+            return (prev.updated_timestamp > current.updated_timestamp) ? prev : current;
+          });
+          latestVersionToShow = newestFile.version;
+        }
+      } catch (e) {
+        console.warn("Failed to fetch latest version for mod", modId, e);
+      }
+    }
 
     if (remoteInfo) {
       // 1. Determine Identity of Installed File
@@ -3640,17 +3832,51 @@ document.addEventListener('DOMContentLoaded', () => {
           downloadHistory.splice(existingIndex, 1);
         }
 
-        // LOGGING: Track specific file processing
         window.addAppLog(`Processing dropped file: ${fileName}`, "INFO");
+
+        const nexusFingerprint = parseNexusFilename(fileName);
+        let modId = "";
+        let modAuthor = "";
+        let modVersion = 'Manual';
+        let modDescription = "";
+        let modOfficialName = fileName;
+
+        if (nexusFingerprint) {
+          window.addAppLog(`Identified as Nexus Mod ID: ${nexusFingerprint.modId}`, "INFO");
+          modId = nexusFingerprint.modId;
+          modVersion = nexusFingerprint.version;
+
+          fetchModMetadataFromNexus(modId).then(meta => {
+            if (meta) {
+              modAuthor = meta.author;
+              modDescription = meta.summary || meta.description || "";
+              modOfficialName = meta.name;
+
+              const item = downloadHistory.find(d => d.id === downloadId);
+              if (item) {
+                item.modId = modId;
+                item.author = modAuthor;
+                item.description = modDescription;
+                item.displayName = modOfficialName;
+                item.version = modVersion;
+                renderDownloadHistory();
+                saveDownloadHistory(downloadHistory);
+              }
+            }
+          }).catch(e => console.error("Failed to fetch metadata for manual mod:", e));
+        }
 
         const downloadId = `manual-${Date.now()}`;
         const newItem = {
           id: downloadId,
-          modId: "",
+          modId: modId,
           fileId: "",
-          version: 'Manual',
-          displayName: fileName,
+          version: modVersion,
+          displayName: modOfficialName,
           fileName: fileName,
+          author: modAuthor,
+          description: modDescription,
+          timestamp: nexusFingerprint ? nexusFingerprint.timestamp : null,
           statusText: i18n.get('statusWaiting') || "Installing...",
           statusClass: 'progress',
           archivePath: null,
@@ -3658,6 +3884,8 @@ document.addEventListener('DOMContentLoaded', () => {
           size: 0,
           createdAt: Date.now() / 1000
         };
+
+
 
         downloadHistory.unshift(newItem);
         renderDownloadHistory();
@@ -4595,11 +4823,9 @@ document.addEventListener('DOMContentLoaded', () => {
   modDetailCloseBtn.addEventListener('click', async () => {
     modDetailPanel.classList.remove('open');
 
-    // Only shrink the window if the manager actually expanded it (PC Mode)
+    // Reset expanded mode state
     if (isPanelOpen) {
       isPanelOpen = false;
-      const currentSize = await appWindow.innerSize();
-      await appWindow.setSize(new LogicalSize(DEFAULT_WIDTH, currentSize.height));
     }
 
     const currentlySelected = browseGridContainer.querySelector('.mod-card.selected');

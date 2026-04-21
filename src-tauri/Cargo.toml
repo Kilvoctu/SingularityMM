@@ -34,6 +34,7 @@ sha2 = "0.10"
 hex = "0.4"
 uuid = { version = "1.18", features = ["v4"] }
 tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 url = "2.5"
 sevenz-rust = "0.6"
