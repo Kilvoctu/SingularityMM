@@ -6,9 +6,10 @@ This fork exists as Singularity does not work properly for me as a Game Pass use
 - Cache the path to prevent repetitive disk searching, and also stop repeated PowerShell popup windows.
 - Stop Singularity from resizing whenever looking at a mod card in "Browse". 
 - Apply asynchronous and throttling logic for fetch operations to avoid UI freezes.
-- Update API calls to fix "Could not retrieve download URL" issues (I don't have Nexus Premium anyway). 
-- Manual installation from Nexus will automatically pull metadata from the file (as Nexus filenames have this format `Mod-ID-Version-Timestamp.zip`)
-- - Mods installed this way will have the automatic metadata, and "Check for Updates" will work by comparing it with Nexus. Who needs Premium!
+- Update API calls to fix "Could not retrieve download URL" issues (I don't have Nexus Premium anyway).
+- Manual installation from Nexus Mods (i.e., dropping in an archive file downloaded from Nexus Mods) will automatically pull metadata from the file.
+- - This works because Nexus Mods filenames have this format `Mod-ID-Version-Timestamp.zip`
+- - Mods installed this way will have the automatic metadata, and "Check for Updates" will work by pulling and comparing it with the mod page. Who needs Premium!
 
 Original Readme below
 # Singularity
