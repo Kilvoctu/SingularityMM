@@ -74,6 +74,15 @@ jobs:
           esac
         shell: bash
 
+      - name: Derive app version from release tag
+        id: appver
+        run: |
+          APP_VERSION="${TAG_NAME#v}"
+          echo "{\"version\":\"$APP_VERSION\"}" > tauri.conf.override.json
+          echo "tauri_args=--config tauri.conf.override.json" >> "$GITHUB_OUTPUT"
+          echo "App version: $APP_VERSION"
+        shell: bash
+
       # --- BUILD, SIGN, AND UPLOAD ---
       - name: Build and Release
         uses: tauri-apps/tauri-action@v0
@@ -87,6 +96,7 @@ jobs:
           releaseBody: "Automatic release for version ${{ env.TAG_NAME }}"
           releaseDraft: true
           prerelease: false
+          args: ${{ steps.appver.outputs.tauri_args }}
 
       # --- RENAME AND UPLOAD PORTABLE ---
       - name: Rename and Upload Portable (Windows)
