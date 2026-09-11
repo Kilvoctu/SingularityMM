@@ -2527,6 +2527,50 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!extMatch) return null;
 
     const baseName = filename.slice(0, extMatch.index);
+
+    // New scheme: Name ModVersion ModID FileVersion ISO-Timestamp DownloadHash
+    // The ISO timestamp is sanitized for Windows filenames (colons replaced with dashes),
+    // e.g. 2026-09-10T13-31Z or 2026-09-10T13-31-45Z
+    const isoTokenRegex = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}(-\d{2})?Z$/;
+    const tokens = baseName.split(/\s+/);
+    let isoIndex = -1;
+    for (let i = tokens.length - 1; i >= 0; i--) {
+      if (isoTokenRegex.test(tokens[i])) {
+        isoIndex = i;
+        break;
+      }
+    }
+
+    if (isoIndex !== -1) {
+      if (isoIndex < 3) return null;
+
+      if (!/^\d+$/.test(tokens[isoIndex - 2])) return null;
+
+      const hash = tokens[isoIndex + 1];
+      if (hash === undefined || !/^[A-Za-z0-9]+$/.test(hash)) return null;
+
+      const modId = tokens[isoIndex - 2];
+      const name = tokens.slice(0, isoIndex - 2).join(' ');
+      const version = tokens[isoIndex - 1];
+
+      // Rebuild the sanitized ISO timestamp and convert it to epoch seconds
+      const isoParts = tokens[isoIndex].match(/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})(-(\d{2}))?Z$/);
+      let timestamp = null;
+      if (isoParts) {
+        const seconds = isoParts[5] !== undefined ? ':' + isoParts[5] : ':00';
+        const isoRestored = `${isoParts[1]}T${isoParts[2]}:${isoParts[3]}${seconds}Z`;
+        const parsedMs = Date.parse(isoRestored);
+        if (!isNaN(parsedMs)) timestamp = parsedMs / 1000;
+      }
+
+      return {
+        name,
+        modId,
+        version,
+        timestamp
+      };
+    }
+
     const parts = baseName.split('-');
     
     if (parts.length < 3) return null;
@@ -3909,7 +3953,7 @@ document.addEventListener('DOMContentLoaded', () => {
           if (analysis.selection_needed) {
             const userResult = await openFolderSelectionModal(
               analysis.available_folders,
-              fileName,
+              nexusFingerprint ? nexusFingerprint.name : fileName,
               analysis.temp_id
             );
 
