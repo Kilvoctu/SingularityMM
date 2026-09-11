@@ -6,6 +6,14 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag (e.g. v2.2.9)"
+        required: true
+        type: string
+
+env:
+  TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
 
 jobs:
   publish-tauri:
@@ -57,6 +65,15 @@ jobs:
       - name: Install Frontend Dependencies
         run: npm install
 
+      - name: Validate dispatch version input
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          case "${{ inputs.version }}" in
+            v*) echo "OK: release tag ${{ inputs.version }}" ;;
+            *) echo "::error::version input must start with 'v' (e.g. v2.2.9), got: ${{ inputs.version }}"; exit 1 ;;
+          esac
+        shell: bash
+
       # --- BUILD, SIGN, AND UPLOAD ---
       - name: Build and Release
         uses: tauri-apps/tauri-action@v0
@@ -65,9 +82,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Singularity ${{ github.ref_name }}"
-          releaseBody: "Automatic release for version ${{ github.ref_name }}"
+          tagName: ${{ env.TAG_NAME }}
+          releaseName: "Singularity ${{ env.TAG_NAME }}"
+          releaseBody: "Automatic release for version ${{ env.TAG_NAME }}"
           releaseDraft: true
           prerelease: false
 
@@ -79,7 +96,7 @@ jobs:
           cd src-tauri/target/release/
 
           # Rename the raw file to include "Portable"
-          mv Singularity.exe Singularity_Portable_${{ github.ref_name }}.exe
+          mv Singularity.exe Singularity_Portable_${TAG_NAME}.exe
 
         shell: bash
 
@@ -87,7 +104,7 @@ jobs:
         if: matrix.platform == 'windows-latest'
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ env.TAG_NAME }}
           draft: true
           prerelease: false
-          files: src-tauri/target/release/Singularity_Portable_${{ github.ref_name }}.exe
+          files: src-tauri/target/release/Singularity_Portable_${{ env.TAG_NAME }}.exe
