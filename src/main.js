@@ -1139,57 +1139,65 @@ document.addEventListener('DOMContentLoaded', () => {
           if (remoteModInfo && remoteModInfo.files) {
 
             // --- 1. IDENTIFY INSTALLED MOD ---
-            let installedBaseName = "";
+            // Build base-name candidates in priority order. If one source yields
+            // no matching files on Nexus (e.g. a stale File ID purged from the
+            // curated list, or a zip filename whose random hash no longer
+            // matches), fall back to the next identity source.
+            const baseNameCandidates = [];
 
-            // Try matching by File ID first (Most accurate)
+            // Most accurate: match by File ID (when that file still exists on Nexus)
             const installedFileOnNexus = remoteModInfo.files.find(f => String(f.file_id) === String(installedFileId));
-
             if (installedFileOnNexus) {
-              // Use the display name from Nexus
-              installedBaseName = getBaseName(installedFileOnNexus.name || installedFileOnNexus.file_name);
-            } else if (localModInfo.install_source) {
-              // Fallback: Use the local zip filename
-              installedBaseName = getBaseName(localModInfo.install_source);
-            } else {
-              // Last Resort: Use the folder name itself
-              installedBaseName = getBaseName(modFolderName);
+              baseNameCandidates.push(getBaseName(installedFileOnNexus.name || installedFileOnNexus.file_name));
             }
 
+            // Fallback: the local zip filename from install time
+            if (localModInfo.install_source) {
+              baseNameCandidates.push(getBaseName(localModInfo.install_source));
+            }
+
+            // Last Resort: the folder name itself
+            baseNameCandidates.push(getBaseName(modFolderName));
+
             // --- 2. FIND UPDATES ---
-            if (installedBaseName) {
-              const candidateFiles = remoteModInfo.files.filter(f => {
+            let candidateFiles = [];
+            for (const installedBaseName of baseNameCandidates) {
+              if (!installedBaseName) continue;
+
+              candidateFiles = remoteModInfo.files.filter(f => {
                 // Never consider 'OLD_VERSION' files as a new update
                 if (f.category_name === 'OLD_VERSION') return false;
 
-                const candidateBaseName = getBaseName(f.name || f.file_name);
-                return candidateBaseName === installedBaseName;
+                // Match against both the clean display name and the raw download filename
+                return getBaseName(f.name) === installedBaseName || getBaseName(f.file_name) === installedBaseName;
               });
 
-              if (candidateFiles.length > 0) {
-                // Find the absolute newest file among candidates
-                const latestFile = candidateFiles.sort((a, b) => b.uploaded_timestamp - a.uploaded_timestamp)[0];
+              if (candidateFiles.length > 0) break;
+            }
 
-                if (isNewerVersionAvailable(installedVersion, latestFile.version)) {
+            if (candidateFiles.length > 0) {
+              // Find the absolute newest file among candidates
+              const latestFile = candidateFiles.sort((a, b) => b.uploaded_timestamp - a.uploaded_timestamp)[0];
 
-                  // VISUALS: Show Yellow Dot
-                  const row = modListContainer.querySelector(`.mod-row[data-mod-name="${modFolderName}"]`);
-                  const indicator = row?.querySelector('.update-indicator');
-                  if (indicator) indicator.classList.remove('hidden');
+              if (isNewerVersionAvailable(installedVersion, latestFile.version)) {
+                // VISUALS: Show Yellow Dot
+                const row = modListContainer.querySelector(`.mod-row[data-mod-name="${modFolderName}"]`);
+                const indicator = row?.querySelector('.update-indicator');
+                if (indicator) indicator.classList.remove('hidden');
 
-                  // MODAL: Add to list
-                  const modIdStr = String(modId);
-                  if (!groupedUpdates.has(modIdStr)) {
-                    groupedUpdates.set(modIdStr, {
-                      name: remoteModInfo.name || modFolderName,
-                      installed: installedVersion,
-                      latest: latestFile.version,
-                      nexusUrl: `https://www.nexusmods.com/nomanssky/mods/${remoteModInfo.mod_id}`,
-                      folders: [modFolderName]
-                    });
-                  } else {
-                    const entry = groupedUpdates.get(modIdStr);
-                    entry.folders.push(modFolderName);
-                  }
+                // MODAL: Add to list
+                const modIdStr = String(modId);
+                if (!groupedUpdates.has(modIdStr)) {
+                  groupedUpdates.set(modIdStr, {
+                    name: remoteModInfo.name || modFolderName,
+                    installed: installedVersion,
+                    latest: latestFile.version,
+                    nexusUrl: `https://www.nexusmods.com/nomanssky/mods/${remoteModInfo.mod_id}`,
+                    folders: [modFolderName]
+                  });
+                } else {
+                  const entry = groupedUpdates.get(modIdStr);
+                  entry.folders.push(modFolderName);
                 }
               }
             }
@@ -1285,6 +1293,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Remove file extensions first
     clean = clean.replace(/\.(zip|rar|7z|pak)$/i, '');
+
+    // Remove the full Nexus download suffix if present:
+    // " <modId> <version> <date>T<time>Z <hash>" e.g. " 2252 5.8 2026-09-30T08-00Z MWrySmNRZ"
+    clean = clean.replace(/\s\d+\s\d+(\.\d+)*\s\d{4}-\d{2}-\d{2}t\d{2}-\d{2}z\s[a-z0-9]{6,12}$/i, '');
+
+    // Fallback: remove a trailing Nexus hash token (random ~9 chars). This must
+    // happen BEFORE the digit stripping below, otherwise the letters of the hash
+    // survive as orphaned fragments (e.g. "s60W14CNw" -> "s nw") and break matching.
+    clean = clean.replace(/\s[a-z0-9]{9}$/i, '');
 
     // Remove Nexus ID/Date suffix pattern (hyphen+digits at end)
     clean = clean.replace(/-\d+(-\d+)*$/i, '');
