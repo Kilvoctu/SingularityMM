@@ -1,3 +1,5 @@
+I don't think I'll be updating this fork any longer, as I'll just be using my own [app](https://github.com/Kilvoctu/nms_pak_inspector), so I see no reason not to archive this repo.
+
 ## Changes from Upstream
 This fork exists as Singularity does not work properly for me as a Game Pass user, so I've fixed it for myself and added some quality of life:
 
